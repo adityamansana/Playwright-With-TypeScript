@@ -1,0 +1,60 @@
+[
+  {
+    "id": "TC-AI-001",
+    "user_story": "As a recruiter I want to search for candidates by job title so I can find relevant profiles",
+    "feature": "LinkedIn People Search",
+    "epic": "LinkedIn Automation",
+    "severity": "critical",
+    "description": "Search returns results for a valid keyword",
+    "preconditions": ["user is logged in", "user is on LinkedIn feed"],
+    "steps": [
+      {"action": "navigate", "target": "LinkedIn feed"},
+      {"action": "search", "value": "Software Engineer"},
+      {"action": "verify", "target": "results page loaded"},
+      {"action": "verify", "target": "results are present"}
+    ],
+    "expected_result": "Results page shows people results for Software Engineer keyword",
+    "test_data_key": "SOFTWARE_ENGINEER",
+    "output_file": "tests/linkedin/search/TC_AI_001_search_results.spec.ts"
+  },
+  {
+    "id": "TC-AI-002",
+    "user_story": "As a recruiter I want to filter search results by People so I can see only person profiles",
+    "feature": "LinkedIn Search Filters",
+    "epic": "LinkedIn Automation",
+    "severity": "high",
+    "description": "Filter by People shows only people results",
+    "preconditions": ["user is logged in", "search results are displayed"],
+    "steps": [
+      {"action": "navigate", "target": "LinkedIn feed"},
+      {"action": "search", "value": "Product Manager"},
+      {"action": "wait", "target": "results page loaded"},
+      {"action": "click", "target": "People filter"},
+      {"action": "verify", "target": "People filter is active"},
+      {"action": "verify", "target": "results are present"}
+    ],
+    "expected_result": "Results page shows only people profiles after filter applied",
+    "test_data_key": "PRODUCT_MANAGER",
+    "output_file": "tests/linkedin/search/TC_AI_002_people_filter.spec.ts"
+  },
+  {
+    "id": "TC-AI-003",
+    "user_story": "As a recruiter I want to see result card details so I can evaluate candidates quickly",
+    "feature": "LinkedIn Result Cards",
+    "epic": "LinkedIn Automation",
+    "severity": "medium",
+    "description": "Result cards display valid name and title data",
+    "preconditions": ["user is logged in", "search results with people filter applied"],
+    "steps": [
+      {"action": "navigate", "target": "LinkedIn feed"},
+      {"action": "search", "value": "Data Scientist"},
+      {"action": "wait", "target": "results loaded"},
+      {"action": "filter", "target": "People"},
+      {"action": "extract", "target": "result card data"},
+      {"action": "verify", "target": "each card has non-empty name"}
+    ],
+    "expected_result": "All visible result cards have valid name data",
+    "test_data_key": "DATA_SCIENTIST",
+    "output_file": "tests/linkedin/search/TC_AI_003_result_cards.spec.ts"
+  }
+]

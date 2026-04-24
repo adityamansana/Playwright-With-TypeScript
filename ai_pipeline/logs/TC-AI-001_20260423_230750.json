@@ -1,0 +1,13 @@
+{
+  "scenario_id": "TC-AI-001",
+  "status": "FAILED",
+  "generated_file": null,
+  "generation_attempts": 2,
+  "heal_attempts": 0,
+  "errors": [
+    "Generation error attempt 1: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CaM7KJWkasqmysG8kHnEY'}",
+    "Generation error attempt 2: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CaM7KLmgMfE9te3yqWo2D'}"
+  ],
+  "warnings": [],
+  "timestamp": "2026-04-23T23:07:48.666860"
+}

@@ -1,0 +1,12 @@
+{
+  "scenario_id": "TC-AI-001",
+  "status": "HUMAN_REVIEW",
+  "generated_file": "tests/linkedin/search/TC_AI_001_search_results.spec.ts",
+  "generation_attempts": 1,
+  "heal_attempts": 1,
+  "errors": [
+    "TimeoutError: locator.waitFor: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('inpu"
+  ],
+  "warnings": [],
+  "timestamp": "2026-04-24T11:44:38.908089"
+}
