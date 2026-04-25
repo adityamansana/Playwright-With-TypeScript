@@ -1,7 +1,18 @@
 """
 healer.py — Agent 4: Selector Self-Healer
 Uses Claude to analyse failed selectors and suggest replacements.
-Reads current page HTML to find the element using semantic strategies.
+
+Supports both:
+  - CSS string constants: private readonly INPUT = 'input[...]'
+  - Role-based getter methods: private get INPUT(): Locator { return this.page.getByRole(...) }
+
+Healing flow:
+  1. Extract failed selector from error message
+  2. Load captured page HTML for context
+  3. Ask Claude for semantic replacement
+  4. Try fix in generated test file (CSS approach)
+  5. Try fix in page object files (CSS string or getter method)
+  6. Return healed=True if any fix applied
 """
 
 import os
@@ -12,17 +23,6 @@ from context_loader import get_active_prompt
 
 
 class SelectorHealer:
-    """
-    Agent 4 — Self-healing selector engine using Claude.
-
-    Unlike Healenium (which works at WebDriver level with pre-stored baselines),
-    this healer:
-    - Works at source code level
-    - Understands WHY a selector failed
-    - Generates semantically correct Playwright-native replacements
-    - Fixes selectors in page object files, not just generated test files
-    - Uses captured page HTML for accurate replacement suggestions
-    """
 
     def __init__(self, prompts_dir: str):
         self.prompts_dir = prompts_dir
@@ -36,7 +36,9 @@ class SelectorHealer:
         selector_indicators = [
             'locator', 'element', 'selector', 'not found',
             'not visible', 'not attached', 'timeout exceeded',
-            'strict mode violation', 'elementhandle'
+            'strict mode violation', 'elementhandle',
+            'getbyrole', 'getbyplaceholder', 'getbylabel',
+            'getbytext', 'getbytestid'
         ]
         return any(indicator in error for indicator in selector_indicators)
 
@@ -75,14 +77,16 @@ class SelectorHealer:
                 'reasoning': 'Could not identify failed selector from error message'
             }
 
-        # Load page HTML from captured file if not provided directly
+        # Load captured page HTML if not provided
         if not page_html and framework_root:
-            test_id = failure.get('title', '').replace(' ', '_')
-            page_html = self._get_page_html(test_id, framework_root)
+            test_title = failure.get('title', '')
+            page_html = self._get_page_html(test_title, framework_root)
             if page_html:
-                print(f"[HEALER] Loaded page HTML ({len(page_html)} chars) for context")
+                print(f"[HEALER] Loaded page HTML ({len(page_html)} chars)")
+            else:
+                print(f"[HEALER] No page HTML available — Claude will work from error only")
 
-        # Ask Claude for replacement selector
+        # Ask Claude for replacement
         healing_result = self._ask_claude_for_replacement(
             failed_selector=failed_selector,
             error_message=failure.get('error', ''),
@@ -90,41 +94,40 @@ class SelectorHealer:
             test_context=self._extract_test_context(failed_code, failed_selector)
         )
 
+        confidence = healing_result.get('confidence', 0)
         print(f"[HEALER] Claude suggestion: {healing_result.get('new_selector', 'none')} "
-              f"(confidence: {healing_result.get('confidence', 0):.0%})")
+              f"(confidence: {confidence:.0%}, strategy: {healing_result.get('strategy', 'unknown')})")
 
-        if healing_result.get('confidence', 0) < 0.6:
-            print(f"[HEALER] Low confidence — not applying heal")
+        if confidence < 0.6:
+            print(f"[HEALER] Confidence too low ({confidence:.0%}) — not applying")
             return {
                 'healed': False,
                 'updated_code': failed_code,
                 'old_selector': failed_selector,
                 'new_selector': healing_result.get('new_selector', ''),
-                'confidence': healing_result.get('confidence', 0),
+                'confidence': confidence,
                 'reasoning': healing_result.get('reasoning', '')
             }
 
-        # Step 1 — Try to fix in the generated test file
+        # Step 1 — Try fix in generated test file (CSS approach)
         updated_code = self._apply_fix(
             failed_code,
             failed_selector,
             healing_result.get('new_selector', ''),
             healing_result.get('full_locator', '')
         )
-        healed = updated_code != failed_code
-
-        if healed:
+        if updated_code != failed_code:
             print(f"[HEALER] Fixed in test file ✅")
             return {
                 'healed': True,
                 'updated_code': updated_code,
                 'old_selector': failed_selector,
                 'new_selector': healing_result.get('new_selector', ''),
-                'confidence': healing_result.get('confidence', 0),
+                'confidence': confidence,
                 'reasoning': healing_result.get('reasoning', '')
             }
 
-        # Step 2 — Test file fix failed, try page object files
+        # Step 2 — Try fix in page object files
         if framework_root:
             print("[HEALER] Test file fix failed — trying page object files...")
             page_object_result = self._heal_page_object(
@@ -139,36 +142,34 @@ class SelectorHealer:
             'updated_code': failed_code,
             'old_selector': failed_selector,
             'new_selector': healing_result.get('new_selector', ''),
-            'confidence': healing_result.get('confidence', 0),
+            'confidence': confidence,
             'reasoning': healing_result.get('reasoning', '')
         }
 
-    def _get_page_html(self, test_id: str, framework_root: str) -> str:
-        """Load captured page HTML from failed test."""
-        # Sanitise test_id to match what base.fixture.ts saves
-        safe_id = re.sub(r'[^a-z0-9]', '_', test_id, flags=re.IGNORECASE)
-        html_path = os.path.join(framework_root, 'reports', 'html', f'{safe_id}.html')
-        if os.path.exists(html_path):
-            with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read()[:5000]  # First 5000 chars keeps token cost low
-        return ''
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE OBJECT HEALING
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _heal_page_object(self, framework_root: str,
                           failed_selector: str,
                           healing_result: dict):
         """
-        Search page object files for the failed selector and fix there.
-        This is the primary fix path — selectors live in page objects, not test files.
+        Search page object and component files for the failing selector.
+        Handles both CSS string constants and role-based getter methods.
         """
         page_object_files = [
+            'src/components/SearchBar.ts',
             'src/pages/linkedin/SearchPage.ts',
             'src/pages/linkedin/SearchResultsPage.ts',
             'src/pages/linkedin/LoginPage.ts',
-            'src/components/SearchBar.ts',
             'src/components/NavigationBar.ts',
             'src/components/ResultCard.ts',
             'src/components/FilterPanel.ts',
         ]
+
+        new_selector = healing_result.get('new_selector', '')
+        new_strategy = healing_result.get('strategy', 'css')
+        full_locator = healing_result.get('full_locator', '')
 
         for relative_path in page_object_files:
             full_path = os.path.join(framework_root, relative_path)
@@ -178,49 +179,131 @@ class SelectorHealer:
             with open(full_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            # Check if this file contains the failed selector
-            if failed_selector not in content:
-                continue
-
-            new_selector = healing_result.get('new_selector', '')
-            if not new_selector:
-                continue
-
-            # Try replacing with single quotes first, then double quotes
-            updated = content.replace(
-                f"'{failed_selector}'", f"'{new_selector}'"
-            )
-            if updated == content:
-                updated = content.replace(
-                    f'"{failed_selector}"', f'"{new_selector}"'
+            # Approach A — CSS string constant
+            if failed_selector in content:
+                updated = self._replace_css_selector(
+                    content, failed_selector, new_selector
                 )
+                if updated != content:
+                    self._write_with_backup(full_path, content, updated)
+                    print(f"[HEALER] Fixed CSS selector in: {relative_path} ✅")
+                    return self._build_result(
+                        True, failed_selector, new_selector,
+                        healing_result, relative_path
+                    )
 
-            if updated != content:
-                # Backup original before modifying
-                backup_path = full_path + '.backup'
-                with open(backup_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                print(f"[HEALER] Backup saved: {backup_path}")
+            # Approach B — Role-based getter method
+            has_getter = bool(re.search(r'private get \w+\(\): Locator', content))
+            has_role_call = any(m in content for m in [
+                'getByRole', 'getByPlaceholder', 'getByLabel',
+                'getByText', 'getByTestId'
+            ])
 
-                # Write fixed version
-                with open(full_path, 'w', encoding='utf-8') as f:
-                    f.write(updated)
+            if has_getter and has_role_call:
+                updated = self._replace_role_selector(
+                    content, failed_selector,
+                    full_locator, new_selector, new_strategy
+                )
+                if updated != content:
+                    self._write_with_backup(full_path, content, updated)
+                    print(f"[HEALER] Fixed role selector in: {relative_path} ✅")
+                    return self._build_result(
+                        True, failed_selector, new_selector,
+                        healing_result, relative_path
+                    )
 
-                print(f"[HEALER] Fixed selector in: {relative_path} ✅")
-                print(f"[HEALER] '{failed_selector}' → '{new_selector}'")
-
-                return {
-                    'healed': True,
-                    'updated_code': '',  # Page object fixed, not test file
-                    'old_selector': failed_selector,
-                    'new_selector': new_selector,
-                    'confidence': healing_result.get('confidence', 0.8),
-                    'reasoning': f"Fixed in {relative_path}",
-                    'fixed_file': relative_path
-                }
-
-        print(f"[HEALER] Selector '{failed_selector}' not found in any page object file")
+        print(f"[HEALER] Selector not found in any page object file")
         return None
+
+    def _replace_css_selector(self, content: str,
+                               old_sel: str, new_sel: str) -> str:
+        """Replace CSS string constant."""
+        updated = content.replace(f"'{old_sel}'", f"'{new_sel}'")
+        if updated == content:
+            updated = content.replace(f'"{old_sel}"', f'"{new_sel}"')
+        return updated
+
+    def _replace_role_selector(self, content: str, failed_selector: str,
+                                full_locator: str, new_selector: str,
+                                new_strategy: str) -> str:
+        """
+        Replace a failing role-based call inside a getter method.
+        Adds the new locator as the first option in the .or() chain.
+
+        Before:
+          private get INPUT(): Locator {
+            return this.page.getByRole('combobox', { name: /search/i })
+              .or(this.page.getByPlaceholder('Search'))
+          }
+
+        After:
+          private get INPUT(): Locator {
+            return this.page.getByRole('textbox', { name: /search/i })
+              .or(this.page.getByRole('combobox', { name: /search/i }))
+              .or(this.page.getByPlaceholder('Search'))
+          }
+        """
+        # Find all getter methods in the file
+        getter_pattern = r'(private get \w+\(\): Locator \{.*?\})'
+        getters = re.findall(getter_pattern, content, re.DOTALL)
+
+        for getter in getters:
+            # Check if this getter contains the failing selector
+            selector_present = (
+                failed_selector in getter or
+                any(call in getter for call in [
+                    'getByRole', 'getByPlaceholder',
+                    'getByLabel', 'getByText'
+                ])
+            )
+
+            if not selector_present:
+                continue
+
+            # Build the new locator call
+            new_locator_call = self._build_locator_call(
+                new_selector, new_strategy, full_locator
+            )
+
+            if not new_locator_call:
+                continue
+
+            # Find the return statement and prepend new locator
+            updated_getter = re.sub(
+                r'(return\s+)(this\.page\.)',
+                f'return {new_locator_call}\n      .or(this.page.',
+                getter,
+                count=1
+            )
+
+            if updated_getter != getter:
+                print(f"[HEALER] Prepending '{new_locator_call}' to getter")
+                return content.replace(getter, updated_getter)
+
+        return content
+
+    def _build_locator_call(self, new_selector: str,
+                             strategy: str, full_locator: str) -> str:
+        """Build a this.page.getBy*() call string."""
+        # Use full_locator from Claude if provided and valid
+        if full_locator and 'this.page.' in full_locator:
+            return full_locator.strip().rstrip(';')
+
+        # Build from strategy + selector
+        strategy_map = {
+            'getByRole':        f"this.page.getByRole('{new_selector}')",
+            'getByPlaceholder': f"this.page.getByPlaceholder('{new_selector}')",
+            'getByLabel':       f"this.page.getByLabel('{new_selector}')",
+            'getByText':        f"this.page.getByText('{new_selector}')",
+            'getByTestId':      f"this.page.getByTestId('{new_selector}')",
+            'css':              f"this.page.locator('{new_selector}')",
+        }
+
+        return strategy_map.get(strategy, f"this.page.locator('{new_selector}')")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CLAUDE API
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _ask_claude_for_replacement(self, failed_selector: str,
                                      error_message: str,
@@ -249,11 +332,11 @@ Find the best Playwright TypeScript replacement selector.
 
 Return ONLY this JSON:
 {{
-    "new_selector": "the selector value only e.g. Search or button",
-    "full_locator": "complete Playwright locator e.g. page.getByRole('button', {{name: 'Search'}})",
+    "new_selector": "the selector value e.g. textbox or Search LinkedIn",
+    "full_locator": "this.page.getByRole('textbox', {{ name: /search/i }})",
     "strategy": "getByRole|getByLabel|getByPlaceholder|getByTestId|css",
     "confidence": 0.85,
-    "reasoning": "brief explanation"
+    "reasoning": "brief explanation of why this selector will work"
 }}
 """
 
@@ -288,48 +371,124 @@ Return ONLY this JSON:
                 'reasoning': f'Parse error: {str(e)}'
             }
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # UTILITIES
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_page_html(self, test_title: str, framework_root: str) -> str:
+        """Load captured page HTML from failed test."""
+        # Try sanitised test title as filename
+        safe_id = re.sub(r'[^a-z0-9]', '_', test_title, flags=re.IGNORECASE)
+        html_dir = os.path.join(framework_root, 'reports', 'html')
+
+        if not os.path.exists(html_dir):
+            return ''
+
+        # Try exact match first
+        exact_path = os.path.join(html_dir, f'{safe_id}.html')
+        if os.path.exists(exact_path):
+            with open(exact_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()[:5000]
+
+        # Try finding most recent HTML file
+        html_files = [
+            f for f in os.listdir(html_dir)
+            if f.endswith('.html')
+        ]
+        if html_files:
+            # Sort by modification time — get most recent
+            html_files.sort(
+                key=lambda f: os.path.getmtime(os.path.join(html_dir, f)),
+                reverse=True
+            )
+            latest = os.path.join(html_dir, html_files[0])
+            print(f"[HEALER] Using most recent HTML: {html_files[0]}")
+            with open(latest, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()[:5000]
+
+        return ''
+
     def _extract_failed_selector(self, error_message: str) -> str:
-        """Extract the failed selector string from an error message."""
+        """
+        Extract failed selector from error message.
+        Handles both CSS locator strings and role-based calls.
+        """
         patterns = [
+            # Role-based patterns — getByRole('combobox')
+            r"getByRole\((['\"][^'\"]+['\"](?:,\s*\{[^}]*\})?)\)",
+            r"getByPlaceholder\((['\"][^'\"]+['\"])\)",
+            r"getByLabel\((['\"][^'\"]+['\"])\)",
+            r"getByText\((['\"][^'\"]+['\"])\)",
+            # CSS locator patterns
             r"locator\(['\"]([^'\"]+)['\"]\)",
-            r"getBy\w+\(['\"]([^'\"]+)['\"]\)",
-            r"selector ['\"]([^'\"]+)['\"]",
+            r"waiting for locator\('([^']+)'\)",
+            r"waiting for locator\(\"([^\"]+)\"\)",
+            # Simple string patterns
             r"'([^']+)'\s+to be visible",
             r"\"([^\"]+)\"\s+to be visible",
-            # Handle comma-separated selectors
-            r"locator\('([^']+)'\)",
         ]
+
         for pattern in patterns:
             match = re.search(pattern, error_message)
             if match:
-                return match.group(1)
+                result = match.group(1).strip()
+                # Clean up quotes from role patterns
+                result = result.strip("'\"")
+                return result
+
         return ''
 
     def _extract_test_context(self, code: str, selector: str) -> str:
-        """Extract the lines around the failed selector for context."""
+        """Extract lines around the failed selector for context."""
+        if not selector or not code:
+            return code[:500] if code else ''
+
         lines = code.split('\n')
-        context_lines = []
         for i, line in enumerate(lines):
             if selector in line:
                 start = max(0, i - 3)
                 end = min(len(lines), i + 4)
-                context_lines = lines[start:end]
-                break
-        return '\n'.join(context_lines) if context_lines else code[:500]
+                return '\n'.join(lines[start:end])
+
+        return code[:500]
 
     def _apply_fix(self, code: str, old_selector: str,
                    new_selector: str, full_locator: str) -> str:
-        """Apply the healed selector to the test code."""
+        """Apply healed selector to test file code."""
         if not new_selector:
             return code
 
-        # Skip if full locator already exists in code
+        # Skip if full locator already present
         if full_locator and full_locator in code:
             return code
 
-        # Replace with single quotes first, then double quotes
+        # Try single quotes then double quotes
         updated = code.replace(f"'{old_selector}'", f"'{new_selector}'")
         if updated == code:
             updated = code.replace(f'"{old_selector}"', f'"{new_selector}"')
 
         return updated
+
+    def _write_with_backup(self, full_path: str,
+                            original: str, updated: str):
+        """Write updated file with backup of original."""
+        backup_path = full_path + '.backup'
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            f.write(original)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(updated)
+        print(f"[HEALER] Backup saved: {os.path.basename(backup_path)}")
+
+    def _build_result(self, healed: bool, old_sel: str,
+                       new_sel: str, healing_result: dict,
+                       fixed_file: str) -> dict:
+        """Build standardised result dict."""
+        return {
+            'healed': healed,
+            'updated_code': '',
+            'old_selector': old_sel,
+            'new_selector': new_sel,
+            'confidence': healing_result.get('confidence', 0.8),
+            'reasoning': healing_result.get('reasoning', f"Fixed in {fixed_file}"),
+            'fixed_file': fixed_file
+        }
